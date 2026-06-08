@@ -1,0 +1,281 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>의료이용 지표 Interactive Map 2002-2023</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: Arial, "Malgun Gothic", sans-serif;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    .control-panel {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      background: white;
+      padding: 12px 14px;
+      border-radius: 6px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+      min-width: 300px;
+      font-size: 14px;
+    }
+
+    .control-panel label {
+      display: block;
+      margin-top: 8px;
+      font-weight: 600;
+    }
+
+    .control-panel select,
+    .control-panel input {
+      width: 100%;
+      margin-top: 4px;
+    }
+
+    .year-value {
+      font-weight: 700;
+      font-size: 18px;
+      margin-left: 6px;
+    }
+
+    .legend {
+      position: absolute;
+      bottom: 24px;
+      right: 12px;
+      z-index: 1000;
+      background: white;
+      padding: 10px 12px;
+      border-radius: 6px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .legend-gradient {
+      width: 190px;
+      height: 12px;
+      background: linear-gradient(to right, #f7fbff, #c6dbef, #6baed6, #2171b5, #08306b);
+      margin: 6px 0;
+      border: 1px solid #ccc;
+    }
+
+    .missing-note {
+      color: #666;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .loading {
+      position: absolute;
+      left: 12px;
+      bottom: 24px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.94);
+      padding: 8px 10px;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      font-size: 13px;
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <div class="control-panel">
+    <label>지표</label>
+    <select id="metricSelect">
+      <option value="op_visit_rate">1인당 연간 외래 방문 건수</option><option value="ed_user_rate">연간 1회 이상 응급실 이용자 비율</option><option value="ip_user_rate">연간 1회 이상 입원자 비율</option><option value="ip_los_rate">1인당 연간 입원일수</option>
+    </select>
+
+    <label>연도 <span id="yearText" class="year-value">2002</span></label>
+    <input id="yearSlider" type="range" min="2002" max="2023" step="1" value="2002">
+  </div>
+
+  <div class="legend">
+    <div id="legendTitle"></div>
+    <div class="legend-gradient"></div>
+    <div style="display:flex; justify-content:space-between;">
+      <span id="legendMin"></span>
+      <span id="legendMax"></span>
+    </div>
+    <div class="missing-note">회색: 자료 없음</div>
+  </div>
+
+  <div id="loading" class="loading">불러오는 중...</div>
+
+<script>
+const colorInfo = {"op_visit_rate": {"label": "1인당 연간 외래 방문 건수", "vmin": 4.9011711746373745, "vmax": 20.4101299154865, "is_percent": false}, "ed_user_rate": {"label": "연간 1회 이상 응급실 이용자 비율", "vmin": 0.5441786742540705, "vmax": 0.8522204053120808, "is_percent": true}, "ip_user_rate": {"label": "연간 1회 이상 입원자 비율", "vmin": 0.046988297504282524, "vmax": 0.2371161696533591, "is_percent": true}, "ip_los_rate": {"label": "1인당 연간 입원일수", "vmin": 0.4417797447457267, "vmax": 8.768041071155011, "is_percent": false}};
+
+let currentYear = "2002";
+let currentMetric = "op_visit_rate";
+let currentLayer = null;
+const geojsonCache = {};
+
+const map = L.map("map").setView([36.3, 127.8], 7);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18,
+  attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+function clamp(x, lo, hi) {
+  return Math.max(lo, Math.min(hi, x));
+}
+
+function colorForValue(value, metric) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "#d9d9d9";
+  }
+
+  const info = colorInfo[metric];
+  const t = clamp((value - info.vmin) / (info.vmax - info.vmin), 0, 1);
+
+  return chroma.scale(["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"])(t).hex();
+}
+
+function formatValue(value, metric) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "자료 없음";
+  }
+
+  if (colorInfo[metric].is_percent) {
+    return (value * 100).toFixed(2) + "%";
+  }
+
+  return Number(value).toFixed(3);
+}
+
+function styleFeature(feature) {
+  const value = feature.properties[currentMetric];
+
+  return {
+    fillColor: colorForValue(value, currentMetric),
+    weight: 0.7,
+    opacity: 1,
+    color: "#555",
+    fillOpacity: 0.78
+  };
+}
+
+function onEachFeature(feature, layer) {
+  const p = feature.properties;
+  const value = p[currentMetric];
+
+  layer.bindTooltip(
+    `
+    <b>지역:</b> ${p.SIGUNGU_NM ?? ""}<br>
+    <b>경계 코드:</b> ${p.SIGUNGU_CD}<br>
+    <b>의료이용 코드:</b> ${p.area_id ?? "매칭 없음"}<br>
+    <b>연도:</b> ${currentYear}<br>
+    <b>${colorInfo[currentMetric].label}:</b> ${formatValue(value, currentMetric)}
+    `,
+    { sticky: true }
+  );
+}
+
+function updateLegend() {
+  const info = colorInfo[currentMetric];
+
+  document.getElementById("legendTitle").innerText = info.label;
+  document.getElementById("legendMin").innerText = formatValue(info.vmin, currentMetric);
+  document.getElementById("legendMax").innerText = formatValue(info.vmax, currentMetric);
+}
+
+function setLoading(isLoading) {
+  document.getElementById("loading").style.display = isLoading ? "block" : "none";
+}
+
+async function loadGeojson(year) {
+  if (geojsonCache[year]) {
+    return geojsonCache[year];
+  }
+
+  setLoading(true);
+
+  const response = await fetch(`data/${year}.geojson`);
+  if (!response.ok) {
+    throw new Error(`GeoJSON 파일을 불러오지 못했습니다: data/${year}.geojson`);
+  }
+
+  const data = await response.json();
+  geojsonCache[year] = data;
+
+  setLoading(false);
+  return data;
+}
+
+async function renderMap({ fit = false } = {}) {
+  const geojson = await loadGeojson(currentYear);
+
+  if (currentLayer !== null) {
+    map.removeLayer(currentLayer);
+  }
+
+  currentLayer = L.geoJSON(geojson, {
+    style: styleFeature,
+    onEachFeature: onEachFeature
+  }).addTo(map);
+
+  updateLegend();
+
+  if (fit) {
+    map.fitBounds(currentLayer.getBounds());
+  }
+}
+
+document.getElementById("metricSelect").addEventListener("change", function(e) {
+  currentMetric = e.target.value;
+
+  if (currentLayer !== null) {
+    currentLayer.setStyle(styleFeature);
+    currentLayer.eachLayer(function(layer) {
+      const feature = layer.feature;
+      const p = feature.properties;
+      const value = p[currentMetric];
+
+      layer.setTooltipContent(
+        `
+        <b>지역:</b> ${p.SIGUNGU_NM ?? ""}<br>
+        <b>경계 코드:</b> ${p.SIGUNGU_CD}<br>
+        <b>의료이용 코드:</b> ${p.area_id ?? "매칭 없음"}<br>
+        <b>연도:</b> ${currentYear}<br>
+        <b>${colorInfo[currentMetric].label}:</b> ${formatValue(value, currentMetric)}
+        `
+      );
+    });
+  }
+
+  updateLegend();
+});
+
+document.getElementById("yearSlider").addEventListener("input", async function(e) {
+  currentYear = e.target.value;
+  document.getElementById("yearText").innerText = currentYear;
+  await renderMap();
+});
+
+renderMap({ fit: true });
+</script>
+</body>
+</html>
